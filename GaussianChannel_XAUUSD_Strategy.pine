@@ -1,0 +1,291 @@
+// ============================================================
+// Enhanced Gaussian Channel + Stochastic RSI Strategy
+// Varlık  : XAUUSD (Altın / Gold)
+// Zaman Dilimi : 1 Günlük (1D)
+// Yön     : Yalnızca Long (Alış)
+// Versiyon : Pine Script v5
+//
+// Strateji Özeti:
+//   Gaussian Kanalı trend yönünü belirler; Stochastic RSI
+//   yatay piyasalardaki sahte giriş sinyallerini filtreler.
+//   İşlemler mum kapanışında gerçekleşir (anti-repainting).
+// ============================================================
+//@version=5
+strategy(
+     title              = "Gaussian Channel + StochRSI | XAUUSD 1D",
+     shorttitle         = "GC-SRSI-XAUUSD",
+     overlay            = true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 100,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.1,
+     slippage           = 3,
+     calc_on_every_tick = false,        // Anti-repainting: sadece mum kapanışında hesapla
+     process_orders_on_close = true     // Emirler mum kapanışında işleme girer
+     )
+
+// ============================================================
+// ── GIRDI PARAMETRELERİ (Input Parameters) ──────────────────
+// ============================================================
+
+// Gaussian Kanalı
+i_poles     = input.int   (4,    "Poles (Kutup Sayısı)",   minval=1, maxval=9, group="Gaussian Kanalı",
+                            tooltip="Gauss filtresinin düzgünlük derecesi. 4 varsayılan ve en yaygın değerdir.")
+i_period    = input.int   (144,  "Period (Periyot)",        minval=2,           group="Gaussian Kanalı",
+                            tooltip="Filtrenin baktığı mum sayısı. 1D grafikte 144 önerilir.")
+i_mult      = input.float (1.5,  "Multiplier (Çarpan)",     step=0.1,           group="Gaussian Kanalı",
+                            tooltip="Bant genişliğini belirler. Daha büyük değer = daha geniş kanal.")
+i_use_tr    = input.bool  (true, "True Range Kullan",                           group="Gaussian Kanalı",
+                            tooltip="İşaretliyse True Range, değilse High-Low kullanılır.")
+
+// Stochastic RSI
+i_rsi_len   = input.int   (14, "RSI Uzunluğu",             group="Stochastic RSI")
+i_stoch_len = input.int   (14, "Stochastic Uzunluğu",      group="Stochastic RSI")
+i_k_smooth  = input.int   (3,  "K Düzleştirme",            group="Stochastic RSI")
+i_d_smooth  = input.int   (3,  "D Düzleştirme",            group="Stochastic RSI")
+i_ob_level  = input.float (80, "Aşırı Alım Seviyesi",      group="Stochastic RSI",
+                            tooltip="K bu seviyenin üzerindeyse filtre aktif (Overbought).")
+i_os_level  = input.float (20, "Aşırı Satım Seviyesi",     group="Stochastic RSI",
+                            tooltip="K bu seviyenin altındaysa filtre aktif (Oversold).")
+
+// Backtest Tarihi
+i_start     = input.time  (timestamp("2018-01-01 00:00 +0000"), "Backtest Başlangıç Tarihi", group="Backtest")
+
+// Görsel Ayarlar
+i_show_labels   = input.bool(true,  "Alış / Satış Etiketlerini Göster", group="Görsel")
+i_show_table    = input.bool(true,  "Bilgi Tablosunu Göster",           group="Görsel")
+i_show_bg       = input.bool(true,  "Arka Plan Rengini Göster",         group="Görsel")
+
+// ============================================================
+// ── GAUSSIAN FİLTRE FONKSİYONU ──────────────────────────────
+// ============================================================
+// Gauss filtresinin matematiksel temeli:
+//   beta  = (1 - cos(2π/period)) / (sqrt(2)^(2/poles) - 1)
+//   alpha = -beta + sqrt(beta² + 2·beta)
+// Filtre 'poles' kadar ardışık EMA uygulamasıyla elde edilir.
+gauss(src, poles, period) =>
+    float beta  = (1.0 - math.cos(2.0 * math.pi / period)) /
+                  (math.pow(math.sqrt(2.0), 2.0 / poles) - 1.0)
+    float alpha = -beta + math.sqrt(beta * beta + 2.0 * beta)
+    float c     = 1.0 - alpha
+
+    // Her kutup için kalıcı (var) değişken — mum başına bir kez güncellenir
+    var float g1 = na
+    var float g2 = na
+    var float g3 = na
+    var float g4 = na
+    var float g5 = na
+    var float g6 = na
+    var float g7 = na
+    var float g8 = na
+    var float g9 = na
+
+    g1 := na(g1) ? src : alpha * src + c * g1
+    g2 := poles >= 2 ? (na(g2) ? src : alpha * g1  + c * g2) : g1
+    g3 := poles >= 3 ? (na(g3) ? src : alpha * g2  + c * g3) : g2
+    g4 := poles >= 4 ? (na(g4) ? src : alpha * g3  + c * g4) : g3
+    g5 := poles >= 5 ? (na(g5) ? src : alpha * g4  + c * g5) : g4
+    g6 := poles >= 6 ? (na(g6) ? src : alpha * g5  + c * g6) : g5
+    g7 := poles >= 7 ? (na(g7) ? src : alpha * g6  + c * g7) : g6
+    g8 := poles >= 8 ? (na(g8) ? src : alpha * g7  + c * g8) : g7
+    g9 := poles >= 9 ? (na(g9) ? src : alpha * g8  + c * g9) : g8
+
+    result = switch poles
+        1 => g1
+        2 => g2
+        3 => g3
+        4 => g4
+        5 => g5
+        6 => g6
+        7 => g7
+        8 => g8
+        => g9
+    result
+
+// ============================================================
+// ── GAUSSIAN KANALI HESAPLAMA ────────────────────────────────
+// ============================================================
+float tr_src     = i_use_tr ? ta.tr(true) : (high - low)
+
+// Her kaynak için bağımsız filtre hesabı (ayrı call-site = ayrı var)
+float gc_hi      = gauss(high,   i_poles, i_period)
+float gc_lo      = gauss(low,    i_poles, i_period)
+float gc_mid     = gauss(close,  i_poles, i_period)
+float gc_tr      = gauss(tr_src, i_poles, i_period)
+
+// Üst ve alt bantlar
+float gc_upper   = gc_hi + i_mult * gc_tr
+float gc_lower   = gc_lo - i_mult * gc_tr
+
+// Kanal rengi: Üst bant yükseliyorsa → YEŞİL (Bullish), düşüyorsa → KIRMIZI (Bearish)
+bool  gc_is_green = gc_upper > gc_upper[1]
+
+// ============================================================
+// ── STOCHASTIC RSI HESAPLAMA ─────────────────────────────────
+// ============================================================
+float rsi_val    = ta.rsi(close, i_rsi_len)
+float stoch_rsi  = ta.stoch(rsi_val, rsi_val, rsi_val, i_stoch_len)
+float k_val      = ta.sma(stoch_rsi, i_k_smooth)
+float d_val      = ta.sma(k_val,     i_d_smooth)
+
+// Filtre: K, aşırı alım (>80) VEYA aşırı satım (<20) bölgesindeyse aktif
+// Bu filtre yatay piyasalardaki düşük kaliteli sinyalleri engeller
+bool  srsi_filter = k_val >= i_ob_level or k_val <= i_os_level
+
+// ============================================================
+// ── GİRİŞ / ÇIKIŞ SİNYALLERİ ────────────────────────────────
+// ============================================================
+bool in_date_range = time >= i_start
+
+// ── LONG GİRİŞ KOŞULLARI ──────────────────────────────────
+// 1. Backtest tarih aralığındayız
+// 2. Gaussian Kanalı YEŞİL (üst bant yükseliyor)
+// 3. Kapanış fiyatı, üst bandı yukarı yönde kesiyor (crossover)
+// 4. Stochastic RSI filtresi aktif (k > 80 veya k < 20)
+bool long_entry = in_date_range         and
+                  gc_is_green           and
+                  ta.crossover(close, gc_upper) and
+                  srsi_filter
+
+// ── LONG ÇIKIŞ KOŞULU ─────────────────────────────────────
+// Kapanış fiyatı, üst bandı aşağı yönde kestiğinde pozisyon kapatılır
+bool long_exit = ta.crossunder(close, gc_upper)
+
+// ============================================================
+// ── STRATEJİ ÇALIŞTIRICISI (mum kapanışında) ────────────────
+// ============================================================
+if long_entry
+    strategy.entry("Long", strategy.long, comment="GC Giriş")
+
+if long_exit
+    strategy.close("Long", comment="GC Çıkış")
+
+// ============================================================
+// ── GÖRSEL ÇİZİMLER ─────────────────────────────────────────
+// ============================================================
+color col_bull_line = color.new(color.lime,    0)
+color col_bear_line = color.new(color.red,     0)
+color col_mid_line  = color.new(color.gray,   40)
+color col_bull_fill = color.new(color.green,  82)
+color col_bear_fill = color.new(color.red,    82)
+
+color upper_col = gc_is_green ? col_bull_line : col_bear_line
+color lower_col = gc_is_green ? col_bull_line : col_bear_line
+color fill_col  = gc_is_green ? col_bull_fill : col_bear_fill
+
+plot(gc_upper, "Üst Bant",  upper_col, linewidth=2)
+plot(gc_mid,   "Orta Bant", col_mid_line, linewidth=1, style=plot.style_line)
+pUpper = plot(gc_upper, "Bant Üst (fill)", color.new(color.na, 100), editable=false)
+pLower = plot(gc_lower, "Bant Alt (fill)", color.new(color.na, 100), editable=false)
+fill(pUpper, pLower, fill_col, title="Kanal Dolgusu")
+plot(gc_lower, "Alt Bant",  lower_col, linewidth=2)
+
+// Giriş / Çıkış etiketleri
+if i_show_labels
+    if long_entry
+        label.new(bar_index, low * 0.999,
+                  "▲ ALIŞ\n" + str.tostring(close, "#.##"),
+                  style    = label.style_label_up,
+                  color    = color.new(color.lime, 10),
+                  textcolor= color.black,
+                  size     = size.small)
+    if long_exit and strategy.position_size > 0
+        label.new(bar_index, high * 1.001,
+                  "▼ ÇIKIŞ\n" + str.tostring(close, "#.##"),
+                  style    = label.style_label_down,
+                  color    = color.new(color.red, 10),
+                  textcolor= color.white,
+                  size     = size.small)
+
+// Arka plan rengi: Pozisyon açıkken mavi, yoksa şeffaf
+if i_show_bg
+    bgcolor(strategy.position_size > 0 ? color.new(color.blue, 92) : na,
+            title="Pozisyon Arka Planı")
+
+// ============================================================
+// ── BİLGİ TABLOSU ───────────────────────────────────────────
+// ============================================================
+if i_show_table
+    var table tbl = table.new(
+         position     = position.top_right,
+         columns      = 2,
+         rows         = 9,
+         bgcolor      = color.new(color.black, 72),
+         border_color = color.new(color.gray, 40),
+         border_width = 1,
+         frame_color  = color.new(color.silver, 20),
+         frame_width  = 1)
+
+    if barstate.islast
+        // Başlık
+        table.cell(tbl, 0, 0, "GC + StochRSI | XAUUSD 1D",
+                   text_color=color.white, text_size=size.small,
+                   bgcolor=color.new(color.navy, 50))
+        table.merge_cells(tbl, 0, 0, 1, 0)
+
+        // Satır yardımcı fonksiyonu yerine tekrarlı hücreler
+        table.cell(tbl, 0, 1, "GC Üst Bant",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 1, str.tostring(gc_upper, "#.##"),
+                   text_color=color.lime, text_size=size.small)
+
+        table.cell(tbl, 0, 2, "GC Alt Bant",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 2, str.tostring(gc_lower, "#.##"),
+                   text_color=color.orange, text_size=size.small)
+
+        table.cell(tbl, 0, 3, "GC Orta Hat",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 3, str.tostring(gc_mid, "#.##"),
+                   text_color=color.gray, text_size=size.small)
+
+        table.cell(tbl, 0, 4, "Kanal Trendi",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 4,
+                   gc_is_green ? "YEŞİL (Bullish)" : "KIRMIZI (Bearish)",
+                   text_color=gc_is_green ? color.lime : color.red,
+                   text_size=size.small)
+
+        table.cell(tbl, 0, 5, "StochRSI K",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 5, str.tostring(k_val, "#.##"),
+                   text_color = k_val >= i_ob_level ? color.yellow :
+                                k_val <= i_os_level ? color.aqua   : color.gray,
+                   text_size=size.small)
+
+        table.cell(tbl, 0, 6, "SRSI Filtresi",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 6,
+                   srsi_filter ? "AKTİF" : "PASİF",
+                   text_color=srsi_filter ? color.lime : color.red,
+                   text_size=size.small)
+
+        table.cell(tbl, 0, 7, "Pozisyon",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 7,
+                   strategy.position_size > 0 ? "LONG ✓" : "FLAT —",
+                   text_color=strategy.position_size > 0 ? color.lime : color.gray,
+                   text_size=size.small)
+
+        table.cell(tbl, 0, 8, "Giriş Fiyatı",
+                   text_color=color.silver, text_size=size.small)
+        table.cell(tbl, 1, 8,
+                   strategy.position_size > 0 ?
+                        str.tostring(strategy.position_avg_price, "#.##") : "—",
+                   text_color=color.yellow, text_size=size.small)
+
+// ============================================================
+// ── ÖZET: STRATEJİ KULLANIM KILAVUZU ────────────────────────
+// ============================================================
+// ZAMAN DİLİMİ : 1D (Günlük) — XAUUSD
+// GİRİŞ (Long) :
+//   1. gc_is_green == true  (GC üst bant yükseliyor)
+//   2. close crossover gc_upper  (kapanış, üst bandı yukarı kesiyor)
+//   3. StochRSI K >= 80 VEYA K <= 20  (momentum filtresi)
+// ÇIKIŞ        :
+//   close crossunder gc_upper  (kapanış, üst bandı aşağı kesiyor)
+// BACKTEST     : 01.01.2018'den itibaren
+// SERMAYE      : Her işlemde %100 equity
+// KOMİSYON    : %0.1  |  KAYMA: 3 tick
+// REPAINTING  : Kapalı (calc_on_every_tick=false + process_orders_on_close=true)
+// ============================================================
