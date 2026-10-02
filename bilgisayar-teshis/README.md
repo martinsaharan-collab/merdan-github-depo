@@ -2,14 +2,17 @@
 
 ## 1. Teşhis (5 dakika)
 
-1. `Teshis.ps1` dosyasını bilgisayara indirin.
-2. Başlat > "PowerShell" > sağ tık > **Yönetici olarak çalıştır**.
-3. Dosyanın bulunduğu klasöre geçip çalıştırın:
+**Kolay yol:** `Teshis.ps1` ve `Calistir.bat` dosyalarını aynı klasöre indirin, `Calistir.bat` dosyasına **çift tıklayın**, yönetici iznine **Evet** deyin.
+
+**Elle yol:**
+1. Başlat > "PowerShell" > sağ tık > **Yönetici olarak çalıştır**.
+2. Dosyanın bulunduğu klasöre geçip çalıştırın:
    ```powershell
    Set-ExecutionPolicy -Scope Process Bypass -Force
    .\Teshis.ps1
    ```
-4. Masaüstünde oluşan `Teshis-Raporu.txt` dosyasının **ÖZET BULGULAR** bölümüne bakın.
+
+Her iki yolda da masaüstünde oluşan `Teshis-Raporu.txt` dosyasının **ÖZET BULGULAR** bölümüne bakın.
 
 Betik yalnızca okuma yapar; hiçbir ayarı değiştirmez.
 
